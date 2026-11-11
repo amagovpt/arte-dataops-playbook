@@ -107,6 +107,21 @@ Usado para fontes de base de dados on-premises — a única forma suportada de l
 
 Quando a origem é uma base de dados já modelada, o CopyJob aterra dados que dispensam normalização e o pipeline salta a Silver, indo do Bronze directamente para a Gold (`movement_type: bronze_to_gold`). Não é uma propriedade do Tipo 5, é uma consequência da fonte: se os dados precisarem de normalização, a Silver faz falta na mesma.
 
+**Watermark exacto via Data Pipeline — não é caminho suportado.** Foi
+investigado (pipeline SIGA, `e_giap_ws`) tentar um `Copy activity` de Data
+Pipeline com origem SQL Server on-premises e query dinâmica, para obter um
+watermark exacto em vez de uma janela deslizante. Falhou sempre com `The
+datasource type  is invalid` em 8 variações de JSON plausíveis segundo a
+documentação REST. Confirmado depois, por inspecção de todos os
+`DataPipeline` reais do tenant (`e_ext_ingest_ws`), que nenhum usa `Copy
+activity` com origem SQL — os únicos padrões reais de Data Pipeline são
+HTTP→Files (Tipo 1/2) e `WebActivity`→`TridentNotebook` (Tipos 3/4), nenhum
+aplicável a bases on-premises. Para este tipo de fonte, o CopyJob é mesmo a
+única forma suportada, incluindo para extração incremental — não há
+watermark exacto disponível; a alternativa é uma janela deslizante (ex.:
+`WHERE data >= DATEADD(day,-1,GETDATE())`) com `MERGE`/dedupe na Silver.
+Detalhe da investigação em `siga/_fase2_watermark_tentativa_falhada/README.md`.
+
 ---
 
 ## Resultado Devolvido ao Runner

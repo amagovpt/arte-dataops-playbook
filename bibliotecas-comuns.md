@@ -137,23 +137,35 @@ Quando o runner invoca um notebook filho, passa o estado do logger serializado:
 ```python
 call_parameters = {
     "main_set"        : json.dumps(nb_params),
+    "running_local"   : False,
     "log_correlation" : json.dumps(elogger.get_correlation())
 }
 notebookutils.notebook.run(notebook_name, timeout, call_parameters)
 ```
+
+As três chaves são obrigatórias. Sem `running_local: False`, o filho fica com o valor por defeito
+da sua célula `parameters` e corre como se fosse execução manual: em caso de erro levanta excepção
+em vez de devolver ao runner o JSON com o `status` e o `errorId`.
 
 `get_correlation()` devolve um dicionário com todo o estado interno: `ts_initial`, `correlation_id`, `pipeline_id`, `logLevel`, `printOnScreen`, `commulativeWriteTime`, `lastLogTime`, etc.
 
 #### 3. Reconstruir no notebook filho
 
 ```python
-# log_correlation chega como parâmetro JSON do runner
+# log_correlation chega do runner como string JSON, e o construtor precisa de um dict
+if type(log_correlation) == type(""):
+    log_correlation = json.loads(log_correlation)
+
 elogger = ELogger(
-    correlation = log_correlation,  # dicionário com o estado do runner
+    correlation = log_correlation,  # estado do runner, já desserializado
     workspace   = ws,
     nb          = nb                # nome deste notebook filho
 )
 ```
+
+Nos notebooks, esta desserialização acontece na mesma linha que a do `main_set`, logo a seguir à
+célula de parâmetros ([ver Orquestração](orquestracao-runner.md#a-cell-injectada-em-runtime)). Se o
+`log_correlation` chegar ao construtor ainda como string, o acesso às chaves do estado falha.
 
 O notebook filho fica com o **mesmo `correlation_id`** do runner. Todos os eventos gravados por ele aparecem na mesma "sessão" na tabela de logs.
 
@@ -193,23 +205,27 @@ Existem dois conceitos distintos com o mesmo nome que é importante não confund
 
 O ELogger tem um `logLevel` de instância (definido na criação). Cada chamada de log tem também um `logLevel` de chamada. **O evento só é gravado se `logLevel_chamada ≤ logLevel_instância`.**
 
-| `logLevel` instância | O que grava |
+| `logLevel` instância | Eventos que passam o threshold |
 |---|---|
-| `1` | Apenas start e finish — o mínimo para saber se o pipeline correu |
-| `2` | + todos os eventos com `logLevel=2` (o padrão dos helpers) — suficiente para produção normal |
-| `5` | Tudo, incluindo eventos de debug detalhados — usado em desenvolvimento e actualmente no runner em produção |
+| `1` | Os que são chamados com `logLevel = 1`: o start, o finish, o `log_rowCount`, e qualquer chamada onde se tenha passado `logLevel=1` explicitamente |
+| `2` | Os anteriores, mais tudo o que use o valor por defeito dos helpers (`2`) — suficiente para produção normal |
+| `5` | Tudo, incluindo os eventos de debug marcados com `logLevel=5` — usado em desenvolvimento e actualmente no runner em produção |
+
+Passar o threshold não garante que o evento fique gravado: a escrita pode falhar, e nesse caso o
+ELogger imprime o erro e continua ([ver Resiliência](#resiliência)). A ausência de uma linha na
+tabela não prova a ausência do evento.
 
 #### Métodos disponíveis e os seus defaults
 
 | Método | `level` gravado na tabela | `logLevel` de chamada por defeito |
 |---|---|---|
-| `log_event_start(...)` | `info` | 1 — grava sempre |
-| `log_event_Finish(...)` | `info` | 1 — grava sempre |
+| `log_event_start(...)` | `info` | 1 |
+| `log_event_Finish(...)` | `info` | 1 |
 | `log_event_info(step, msg)` | `info` | 2 |
 | `log_event_warn(step, msg)` | `warn` | 2 |
 | `log_event_error(step, msg)` | `error` | 2 |
 | `log_event_dump(step, msg)` | `dump` | 2 |
-| `log_rowCount(step, rowCount)` | `rowCount` | 1 — grava quase sempre |
+| `log_rowCount(step, rowCount)` | `rowCount` | 1 |
 
 O `log_rowCount` grava a contagem na coluna `message`, com `level = "rowCount"`. É o que permite
 consultar volumes por execução sem parsear mensagens livres. Não confundir o `level` com a lista
@@ -286,7 +302,7 @@ evento**: uma mensagem de uma linha custa o mesmo que um dump.
 
 **O que se paga é o Spark, não o volume.** Gravar uma linha custa o mesmo que gravar um milhão:
 o custo é o arranque do job e o commit, não os dados. Num incidente registado, um ciclo de 308
-iterações com três logs cada — executados mesmo nas iterações que não tinham trabalho nenhum —
+iterações, com cerca de três logs cada — executados mesmo nas iterações que não tinham trabalho nenhum —
 gerou 928 escritas e 2h11m, contra 11 segundos de trabalho útil. Cerca de 8 segundos por chamada.
 
 Nota adicional sobre a tabela de logs: um `append` por linha deixa um ficheiro Parquet minúsculo
@@ -579,6 +595,10 @@ Tratamento de erros com saída imediata. Imprime o erro, monta um dicionário co
 | `False` (Fabric, chamado pelo runner) | `notebookutils.notebook.exit(json.dumps(result))` |
 | `True` (execução manual) | levanta `KeyError` com o mesmo JSON, para se ver o traceback |
 
+O dicionário leva **sempre** também `"files_copied": 0`, sobra de quando a função só servia o
+Bronze. Uma Silver ou uma Gold que falhe devolve esse campo na mesma, e ele não significa nada
+fora do Bronze. O runner não o lê — lê só o `new_data`, que o `handleError` não põe.
+
 **Nunca devolve.** Não há valor de retorno a atribuir — `errorState, errorId = handleError(...)`
 é a assinatura de uma versão antiga, definida dentro dos notebooks, e não funciona com a da
 biblioteca. O quarto argumento, `results`, é o que já se tinha feito até ali, para não se perder
@@ -640,7 +660,11 @@ Actualiza o config em runtime — a nível raiz, de grupo ou de task, consoante 
 def run_notebook_with_params(toRun_notebook: str, timeout: int, params: dict)
 ```
 
-Invoca `notebookutils.notebook.run()` e faz parse do resultado JSON. Em caso de excepção, devolve um dicionário de erro com `errorId=-1` e lança `KeyError`.
+Invoca `notebookutils.notebook.run()` e devolve o resultado JSON já desserializado.
+
+**No caminho de erro não devolve nada.** Monta um dicionário com `status: "ERROR"` e `errorId: -1`
+e levanta `KeyError` com esse dicionário serializado — o `return` nunca chega a ser executado. Para
+ler o erro é preciso apanhar o `KeyError` e desserializar `e.args[0]`.
 
 ### `get_execution_plan`
 

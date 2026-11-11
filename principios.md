@@ -100,7 +100,9 @@ Referência a seguir: `notebooks/dados_gov/dados_gov_GOLD.ipynb` — todas as di
 | `notebooks/calamidade/page_apoio_calamidade_dims_nb (1).ipynb` | `create schema` + `saveAsTable("apoio_calamidade.dim_*")` |
 | `notebooks/gapminder/gapminder_BRONZE.ipynb` (célula 6) | `.option("path", abfss_path).saveAsTable(table_name)` |
 
-**Status:** implementado nos pipelines actuais excepto nos dois contra-exemplos acima. Verificado mecanicamente pelo `revisor-pipeline` e pela [Checklist Bronze](checklists/checklist-bronze.md).
+**Status:** implementado nos pipelines actuais. Os dois contra-exemplos acima são ilustrativos, não
+uma lista exaustiva — há outras violações em notebooks legado, e a forma de as encontrar é procurar
+`saveAsTable`, `writeTo` e `CREATE TABLE` no repositório. Verificado pela [Checklist Bronze](checklists/checklist-bronze.md).
 
 ---
 
